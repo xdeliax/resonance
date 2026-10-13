@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+dist/
+experiments/raw/
+*.mp3
+*.wav
+*.mp4
+.DS_Store
