@@ -3,6 +3,7 @@ node_modules/
 .env.*
 !.env.example
 .venv/
+backend/cache/
 __pycache__/
 dist/
 experiments/raw/

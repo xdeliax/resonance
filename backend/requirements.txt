@@ -1,0 +1,8 @@
+# Verified local stack for Apple Silicon / Python 3.12. PyTorch's MPS backend
+# accelerates inference on Apple Silicon; the analyzer retries on CPU if needed.
+torch==2.6.0
+torchaudio==2.6.0
+beat-this==1.1.0
+librosa==0.10.2.post1
+numpy==1.26.4
+soundfile==0.13.1

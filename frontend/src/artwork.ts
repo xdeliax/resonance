@@ -1,10 +1,17 @@
 import * as THREE from 'three';
+import type { AudioFeatures } from './audio';
+
+type AudioFeatureSource = { sample: () => AudioFeatures };
 
 export type ArtworkSettings = {
   movement: number;
   speed: number;
   particleSize: number;
   mouseForce: number;
+  flowStrength: number;
+  persistence: number;
+  ribbonThickness: number;
+  audioInfluence: number;
 };
 
 const PARTICLE_COUNT = 150_000;
@@ -22,6 +29,15 @@ const particleVertexShader = /* glsl */ `
   uniform float uPointerAge;
   uniform float uPointerEnergy;
   uniform float uMouseForce;
+  uniform float uBass;
+  uniform float uMid;
+  uniform float uHigh;
+  uniform float uBeatPulse;
+  uniform float uDownbeatPulse;
+  uniform float uBeatPhase;
+  uniform float uRms;
+  uniform float uBrightness;
+  uniform float uOnsetStrength;
 
   attribute vec2 aOrigin;
   attribute vec3 aColor;
@@ -59,9 +75,17 @@ const particleVertexShader = /* glsl */ `
     vec2 drift = vec2(t * 0.28, -t * 0.19);
     float rippleA = noise(origin * 7.0 + drift + aSeed * 0.3);
     float rippleB = noise(origin * 7.0 - drift.yx + 14.0 + aSeed * 0.3);
-    vec2 fineFlow = vec2(rippleA - 0.5, rippleB - 0.5) * 0.13;
+    vec2 fineFlow = vec2(rippleA - 0.5, rippleB - 0.5)
+      * (0.13 + uHigh * 0.055 + uBrightness * 0.045 + uOnsetStrength * 0.035);
 
-    vec2 position = origin + (current * 0.34 + fineFlow) * uMovement;
+    // Each analyzed feature has a separate role: RMS raises overall motion,
+    // beat phase bends the current, beat pulses breathe the field, and
+    // downbeats add a larger coordinated accent. Live bands remain active.
+    float movementEnvelope = 0.72 + uRms * 0.48;
+    float phaseCurrent = sin(uBeatPhase * 6.2831853) * uRms;
+    vec2 position = origin + (current * (0.34 + uMid * 0.22 + uBass * 0.18 + phaseCurrent * 0.035)
+      + fineFlow * (1.0 + uHigh * 0.65)) * uMovement * movementEnvelope;
+    position += origin * (uBass * 0.045 + uBeatPulse * 0.045 + uDownbeatPulse * 0.09) * uMovement;
 
     vec2 fromPointer = position - uPointer;
     float pointerDistance = length(fromPointer);
@@ -75,7 +99,7 @@ const particleVertexShader = /* glsl */ `
     gl_Position = projectionMatrix * viewPosition;
     // particleSize is specified in CSS pixels at the reference canvas size.
     // Convert to drawing-buffer pixels once, using DPR exactly once.
-    gl_PointSize = uParticleSize * uCanvasScale * uPixelRatio * (0.88 + 0.24 * sin(t * 0.7 + aSeed * 6.2831));
+    gl_PointSize = uParticleSize * uCanvasScale * uPixelRatio * (0.88 + 0.24 * sin(t * 0.7 + aSeed * 6.2831) + uBeatPulse * 0.045 + uDownbeatPulse * 0.07 + uHigh * 0.025);
     vColor = pow(aColor, vec3(2.2));
     vAlpha = 0.88 + 0.12 * sin(t * 0.55 + aSeed * 6.2831);
   }
@@ -132,7 +156,7 @@ function sampleCover(image: HTMLImageElement, count: number) {
   return { origins, positions, colors, seeds };
 }
 
-const defaults: ArtworkSettings = { movement: 1.25, speed: 1, particleSize: 2, mouseForce: 0.20 };
+const defaults: ArtworkSettings = { movement: 1.25, speed: 1, particleSize: 2, mouseForce: 0.20, flowStrength: 0.8, persistence: 0.94, ribbonThickness: 1, audioInfluence: 0.7 };
 
 export class Artwork {
   private renderer: THREE.WebGLRenderer;
@@ -147,6 +171,12 @@ export class Artwork {
   private pointerAge = 100;
   private pointerEnergy = 0;
   private pointerEnergyTarget = 0;
+  private audioFeatures: AudioFeatures = {
+    bass: 0, mid: 0, high: 0, beat: 0, beatAge: 10,
+    beatPulse: 0, downbeatPulse: 0, beatPhase: 0,
+    rms: 0, brightness: 0, onsetStrength: 0, playbackTime: 0, analysisMapped: false,
+  };
+  private audioSource?: AudioFeatureSource;
   private settings = { ...defaults };
   private paused = false;
   private disposed = false;
@@ -154,7 +184,7 @@ export class Artwork {
   private boundPointer: (event: PointerEvent) => void;
   private readonly onResize = () => this.resize();
 
-  constructor(private host: HTMLElement) {
+  constructor(private host: HTMLElement, private coverUrl = '/assets/cover1.jpeg') {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -179,7 +209,7 @@ export class Artwork {
   }
 
   async load() {
-    const texture = await new THREE.TextureLoader().loadAsync('/assets/cover1.jpeg');
+    const texture = await new THREE.TextureLoader().loadAsync(this.coverUrl);
     if (this.disposed) { texture.dispose(); return; }
     this.texture = texture;
     const image = texture.image as HTMLImageElement;
@@ -201,6 +231,15 @@ export class Artwork {
       uPointerAge: { value: this.pointerAge },
       uPointerEnergy: { value: 0 },
       uMouseForce: { value: this.settings.mouseForce },
+      uBass: { value: 0 },
+      uMid: { value: 0 },
+      uHigh: { value: 0 },
+      uBeatPulse: { value: 0 },
+      uDownbeatPulse: { value: 0 },
+      uBeatPhase: { value: 0 },
+      uRms: { value: 0 },
+      uBrightness: { value: 0 },
+      uOnsetStrength: { value: 0 },
     };
     this.material = new THREE.ShaderMaterial({
       uniforms,
@@ -235,6 +274,10 @@ export class Artwork {
     this.material.uniforms.uMouseForce.value = settings.mouseForce;
   }
 
+  setAudioSource(source?: AudioFeatureSource) {
+    this.audioSource = source;
+  }
+
   private handlePointerLeave = () => { this.pointerEnergyTarget = 0; };
 
   private canvasSize() {
@@ -267,9 +310,28 @@ export class Artwork {
       this.pointerEnergy += (this.pointerEnergyTarget - this.pointerEnergy) * (1 - Math.exp(-delta * 2.6));
     }
     if (this.material) {
+      if (this.audioSource) {
+        const nextFeatures = this.audioSource.sample();
+        if (!this.paused) this.audioFeatures = nextFeatures;
+      }
       this.material.uniforms.uTime.value = this.elapsed;
       this.material.uniforms.uPointerAge.value = this.pointerAge;
       this.material.uniforms.uPointerEnergy.value = this.pointerEnergy;
+      const mapped = this.audioFeatures.analysisMapped;
+      // When the precomputed track analysis is active, keep the live Web Audio
+      // bands out of the visual mapping. Saved features and beat events drive
+      // the artwork as one synchronized source; live bands are fallback only.
+      this.material.uniforms.uBass.value = mapped ? 0 : this.audioFeatures.bass;
+      this.material.uniforms.uMid.value = mapped ? 0 : this.audioFeatures.mid;
+      this.material.uniforms.uHigh.value = mapped ? 0 : this.audioFeatures.high;
+      this.material.uniforms.uBeatPulse.value = mapped ? this.audioFeatures.beatPulse : this.audioFeatures.beat;
+      this.material.uniforms.uDownbeatPulse.value = mapped ? this.audioFeatures.downbeatPulse : 0;
+      this.material.uniforms.uBeatPhase.value = mapped ? this.audioFeatures.beatPhase : 0;
+      this.material.uniforms.uRms.value = mapped
+        ? this.audioFeatures.rms
+        : (this.audioFeatures.bass + this.audioFeatures.mid + this.audioFeatures.high) / 3;
+      this.material.uniforms.uBrightness.value = mapped ? this.audioFeatures.brightness : this.audioFeatures.high;
+      this.material.uniforms.uOnsetStrength.value = mapped ? this.audioFeatures.onsetStrength : this.audioFeatures.beat;
     }
     this.renderer.render(this.scene, this.camera);
   };
