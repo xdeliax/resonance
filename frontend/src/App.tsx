@@ -6,6 +6,8 @@ import { validateMatchingAnalysis, type AudioAnalysis } from './analysis';
 import { analyzeCover, type CoverVisualProfile } from './coverProfile';
 import { CoverProfilePreview } from './CoverProfilePreview';
 import { FlowStudyArtwork } from './flowStudy';
+import { LandingPage, type LibraryTrack } from './LandingPage';
+import './landing.css';
 
 const initialSettings: ArtworkSettings = { movement: 1.25, speed: 1, particleSize: 2, mouseForce: 0.2, flowStrength: 0.8, persistence: 0.94, ribbonThickness: 1, audioInfluence: 0.7 };
 
@@ -18,12 +20,18 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
   const [audioName, setAudioName] = useState<string | null>(null);
+  const [audioArtist, setAudioArtist] = useState('The Strokes');
+  const [page, setPage] = useState<'landing' | 'artwork'>(() =>
+    window.location.pathname.replace(/\/$/, '') === '/canvas' ? 'artwork' : 'landing');
+  const [loadingTrack, setLoadingTrack] = useState(false);
   const [coverUrl, setCoverUrl] = useState('/assets/cover1.jpeg');
   const [coverName, setCoverName] = useState('ORIGINAL COVER');
   const [coverProfile, setCoverProfile] = useState<CoverVisualProfile | null>(null);
   const [mode, setMode] = useState<'flow' | 'particles'>('flow');
   const audioFileRef = useRef<File | null>(null);
   const analysisPromiseRef = useRef<Promise<boolean> | null>(null);
+  const selectionIdRef = useRef(0);
+  const libraryAbortRef = useRef<AbortController | null>(null);
   const [audioPlaying, setAudioPlaying] = useState(false);
   const [hasStarted, setHasStarted] = useState(false);
   const [audioFeatures, setAudioFeatures] = useState<AudioFeatures>({
@@ -61,7 +69,7 @@ export default function App() {
   const profileForRenderer = mode === 'flow' && coverProfile?.source === coverUrl ? coverProfile : null;
   useEffect(() => {
     const host = mountRef.current;
-    if (!host || (mode === 'flow' && !profileForRenderer)) return;
+    if (page !== 'artwork' || !host || (mode === 'flow' && !profileForRenderer)) return;
     let cancelled = false;
     let artwork: Artwork | FlowStudyArtwork | null = null;
     try {
@@ -88,15 +96,38 @@ export default function App() {
       artwork?.dispose();
       if (artworkRef.current === artwork) artworkRef.current = null;
     };
-  }, [mode, coverUrl, profileForRenderer]);
+  }, [mode, coverUrl, profileForRenderer, page]);
 
   useEffect(() => { artworkRef.current?.setSettings(settings); }, [settings]);
   useEffect(() => { artworkRef.current?.setPaused(paused); }, [paused]);
   useEffect(() => {
     if (artworkRef.current instanceof FlowStudyArtwork) artworkRef.current.setAnalysis(analysis);
-  }, [analysis, mode, profileForRenderer]);
+  }, [analysis, mode, profileForRenderer, page]);
   useEffect(() => () => {
     if (coverUrlRef.current.startsWith('blob:')) URL.revokeObjectURL(coverUrlRef.current);
+    libraryAbortRef.current?.abort();
+  }, []);
+
+  useEffect(() => {
+    const onPopState = () => {
+      selectionIdRef.current += 1;
+      libraryAbortRef.current?.abort();
+      audioTrackRef.current?.pause();
+      setAudioPlaying(false);
+      setLoadingTrack(false);
+      if (window.location.pathname.replace(/\/$/, '') === '/canvas') {
+        setPage('artwork');
+      } else {
+        setAudioError(null);
+        setPage('landing');
+        if (window.location.hash) {
+          window.requestAnimationFrame(() => window.requestAnimationFrame(() =>
+            document.getElementById(window.location.hash.slice(1))?.scrollIntoView({ behavior: 'auto' })));
+        }
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
   const togglePause = () => {
@@ -127,18 +158,73 @@ export default function App() {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = '';
     if (!file || !audioTrackRef.current) return;
+    selectionIdRef.current += 1;
+    libraryAbortRef.current?.abort();
+    analysisPromiseRef.current = null;
     audioFileRef.current = file;
     audioTrackRef.current.load(file);
     setAnalysis(null);
+    setAnalyzing(false);
     setHasStarted(false);
     setAudioName(file.name.replace(/\.[^.]+$/, ''));
+    setAudioArtist('LOCAL AUDIO');
     setAudioError(null);
     setAudioPlaying(false);
   };
 
-  const analyzeSelectedAudio = async (): Promise<boolean> => {
+  const chooseLibraryTrack = async (item: LibraryTrack) => {
+    const selectionId = ++selectionIdRef.current;
+    libraryAbortRef.current?.abort();
+    const controller = new AbortController();
+    libraryAbortRef.current = controller;
+    audioTrackRef.current?.pause();
+    audioFileRef.current = null;
+    analysisPromiseRef.current = null;
+    setAnalysis(null);
+    setAnalyzing(false);
+    setAudioPlaying(false);
+    setHasStarted(false);
+    setAudioName(item.title);
+    setAudioArtist(item.artist);
+    setAudioError(null);
+    setLoadingTrack(true);
+    try {
+      const response = await fetch(`/api/library/audio?id=${encodeURIComponent(item.id)}`, { signal: controller.signal });
+      if (!response.ok) {
+        const result = await response.json() as { error?: string };
+        throw new Error(result.error ?? 'Could not load this track.');
+      }
+      const blob = await response.blob();
+      if (selectionId !== selectionIdRef.current) return;
+      const file = new File([blob], `${item.id}.mp3`, { type: 'audio/mpeg' });
+      const track = audioTrackRef.current;
+      if (!track) return;
+      analysisPromiseRef.current = null;
+      audioFileRef.current = file;
+      track.load(file);
+      if (item.artwork) {
+        if (coverUrlRef.current.startsWith('blob:')) URL.revokeObjectURL(coverUrlRef.current);
+        coverUrlRef.current = item.artwork;
+        setCoverUrl(item.artwork);
+        setCoverName(`${item.title} cover art`);
+      }
+      setLoadingTrack(false);
+      if (!(await analyzeSelectedAudio(file)) || selectionId !== selectionIdRef.current) return;
+      await track.play();
+      setAudioPlaying(true);
+      setHasStarted(true);
+    } catch (reason) {
+      if (!controller.signal.aborted && selectionId === selectionIdRef.current) {
+        setAudioError(reason instanceof Error ? reason.message : 'Could not load this track.');
+      }
+    } finally {
+      if (selectionId === selectionIdRef.current) setLoadingTrack(false);
+    }
+  };
+
+  const analyzeSelectedAudio = async (selectedFile?: File): Promise<boolean> => {
     if (analysisPromiseRef.current) return analysisPromiseRef.current;
-    const trackFile = audioFileRef.current;
+    const trackFile = selectedFile ?? audioFileRef.current;
     const audioTrack = audioTrackRef.current;
     if (!trackFile || !audioTrack) {
       return false;
@@ -169,11 +255,13 @@ export default function App() {
       const message = reason instanceof TypeError
         ? 'Could not reach the local analysis service. Start the app with npm run dev and confirm backend/.venv is installed.'
         : reason instanceof Error ? reason.message : 'Local audio analysis failed.';
-      setAudioError(message);
+      if (audioFileRef.current === trackFile) setAudioError(message);
       return false;
     } finally {
-      setAnalyzing(false);
-      analysisPromiseRef.current = null;
+      if (audioFileRef.current === trackFile) {
+        setAnalyzing(false);
+        analysisPromiseRef.current = null;
+      }
     }
     })();
     analysisPromiseRef.current = work;
@@ -199,32 +287,66 @@ export default function App() {
     }
   };
 
+  const showLanding = (section: 'top' | 'collection' | 'about' = 'top') => {
+    selectionIdRef.current += 1;
+    libraryAbortRef.current?.abort();
+    audioTrackRef.current?.pause();
+    setAudioPlaying(false);
+    setLoadingTrack(false);
+    setAudioError(null);
+    window.history.pushState({ resonancePage: 'landing' }, '', section === 'top' ? '/' : `/#${section}`);
+    setPage('landing');
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      if (section === 'top') window.scrollTo({ top: 0, behavior: 'auto' });
+      else document.getElementById(section)?.scrollIntoView({ behavior: 'auto' });
+    }));
+  };
+
+  const openCanvas = () => {
+    if (window.location.pathname.replace(/\/$/, '') !== '/canvas') {
+      window.history.pushState({ resonancePage: 'artwork' }, '', '/canvas');
+    }
+    setError(null);
+    setPage('artwork');
+    window.scrollTo({ top: 0, behavior: 'auto' });
+  };
+
+  const enterArtwork = (track: LibraryTrack) => {
+    setError(null);
+    if (track.artwork) {
+      if (coverUrlRef.current.startsWith('blob:')) URL.revokeObjectURL(coverUrlRef.current);
+      coverUrlRef.current = track.artwork;
+      setCoverUrl(track.artwork);
+      setCoverName(`${track.title} cover art`);
+    }
+    openCanvas();
+    void chooseLibraryTrack(track);
+  };
+
   return (
-    <main className="page-shell">
-      <header className="topline">
-        <div className="wordmark" aria-label="Resonance"><span className="mark">R</span><span>RESONANCE</span></div>
-        <div className="topline-tools">
-          <div className="mode-switch" role="group" aria-label="Artwork mode">
-            <button aria-pressed={mode === 'flow'} onClick={() => setMode('flow')}>FLOW STUDY</button>
-            <button aria-pressed={mode === 'particles'} onClick={() => setMode('particles')}>PARTICLES</button>
-          </div>
-          <div className="study-label">VISUAL STUDY <span>01</span></div>
-        </div>
+    <>
+    {page === 'artwork' ? <main className="page-shell">
+      <header className="landing-nav canvas-nav">
+        <button className="landing-brand" type="button" onClick={() => showLanding('top')}>RESONANCE</button>
+        <nav aria-label="Main navigation">
+          <a href="/canvas" aria-current="page" onClick={(event) => event.preventDefault()}>CANVAS</a>
+          <a href="/#about" onClick={(event) => { event.preventDefault(); showLanding('about'); }}>ABOUT</a>
+        </nav>
       </header>
       <section className="stage" aria-label="Track artwork">
         <div className="track-meta">
-          <p className="track-kicker">{audioName ? 'NOW PLAYING' : 'FLOW STUDY'}</p>
-          <h1>{audioName ?? 'Resonance'}</h1>
-          <p className="track-artist">{audioName ? 'LOCAL AUDIO' : 'AUDIOVISUAL STUDY'}</p>
+          <p className="track-kicker">{audioName ? 'NOW PLAYING' : 'CANVAS'}</p>
+          <h1>{audioName ?? 'The Adults Are Talking'}</h1>
+          <p className="track-artist">{audioArtist}</p>
           <div className="track-actions">
             <label className="audio-load">
               LOAD AUDIO
               <input type="file" accept="audio/*" onChange={loadAudio} aria-label="Choose a local audio file" />
             </label>
             <span className="audio-file" title={audioName ?? undefined}>{audioName ?? 'NO TRACK SELECTED'}</span>
-            <button className="pause-control track-play" onClick={toggleAudio} disabled={analyzing || !audioName} aria-label={analyzing ? 'Analyzing audio' : audioPlaying ? 'Pause' : 'Play'}>
+            <button className="pause-control track-play" onClick={toggleAudio} disabled={loadingTrack || analyzing || !audioFileRef.current} aria-label={loadingTrack ? 'Loading track' : analyzing ? 'Analyzing audio' : audioPlaying ? 'Pause' : 'Play'}>
               {audioPlaying ? <Pause size={12} strokeWidth={1.8} /> : analyzing ? null : <Play size={12} strokeWidth={1.8} />}
-              <span>{analyzing ? 'ANALYZING…' : audioPlaying ? 'PAUSE' : 'PLAY'}</span>
+              <span>{loadingTrack ? 'LOADING…' : analyzing ? 'ANALYZING…' : audioPlaying ? 'PAUSE' : 'PLAY'}</span>
             </button>
           </div>
           {analysis && hasStarted && (
@@ -237,6 +359,13 @@ export default function App() {
               <span><b>ONSET</b>{audioFeatures.onsetStrength.toFixed(2)}</span>
             </div>
           )}
+          <div className="canvas-mode-select">
+            <span className="canvas-mode-label">VISUAL MODE</span>
+            <div className="mode-switch" role="group" aria-label="Artwork mode">
+              <button type="button" aria-pressed={mode === 'flow'} onClick={() => setMode('flow')}>FLOW STUDY</button>
+              <button type="button" aria-pressed={mode === 'particles'} onClick={() => setMode('particles')}>PARTICLES</button>
+            </div>
+          </div>
         </div>
         <div className="art-frame" aria-label={mode === 'flow' ? 'Flow Study artwork' : 'Particle artwork'}>
           <div className="canvas-mount" ref={mountRef} />
@@ -286,7 +415,6 @@ export default function App() {
         </label>
       </section>
       <footer className="bottomline">
-        <p className="caption">A STUDY IN MOTION <span>·</span> PROCEDURAL / MOUSE-DRIVEN</p>
         <div className="playback-controls">
           <button className="pause-control visual-pause" onClick={togglePause} aria-label={paused ? 'Resume animation' : 'Pause animation'}>
             {paused ? <Play size={12} strokeWidth={1.8} /> : <Pause size={12} strokeWidth={1.8} />}
@@ -294,8 +422,9 @@ export default function App() {
           </button>
         </div>
       </footer>
+    </main> : <LandingPage onEnter={enterArtwork} onOpenArtwork={openCanvas} />}
       <audio ref={audioElementRef} onEnded={() => setAudioPlaying(false)} />
       {audioError && <p className="audio-error" role="status">{audioError}</p>}
-    </main>
+    </>
   );
 }

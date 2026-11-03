@@ -151,6 +151,7 @@ function paletteFrom(pixels: Uint8ClampedArray) {
 export async function analyzeCover(source: string): Promise<CoverVisualProfile> {
   const image = new Image();
   image.decoding = 'async';
+  image.crossOrigin = 'anonymous';
   image.src = source;
   await image.decode();
 
